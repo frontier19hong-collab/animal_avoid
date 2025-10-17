@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>동물 피하기 게임</title>
+  <style>
+    :root{--ui-bg: rgba(255,255,255,0.85);--accent:#2b6cb0}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,'Noto Sans KR',sans-serif;background:#87ceeb}
+    .wrap{display:flex;flex-direction:column;align-items:center;gap:12px;padding:18px}
+    header{display:flex;gap:12px;align-items:center;width:100%;max-width:900px}
+    h1{margin:0;font-size:18px}
+    .controls{margin-left:auto;display:flex;gap:8px;align-items:center}
+    select,button{padding:8px 10px;border-radius:8px;border:1px solid rgba(0,0,0,0.12);background:var(--ui-bg);cursor:pointer}
+    #gameArea{width:100%;max-width:900px;aspect-ratio:16/9;background:linear-gradient(#6fb3ff,#a2d6ff);border-radius:12px;box-shadow:0 6px 30px rgba(0,0,0,0.15);overflow:hidden;position:relative}
+    canvas{display:block;width:100%;height:100%}
+    .hud{position:absolute;left:12px;top:12px;background:var(--ui-bg);padding:8px 10px;border-radius:8px;font-weight:600}
+    .hud .score{font-size:18px}
+    .hud .lives{font-size:14px;color:#555}
+    .bottomBar{display:flex;gap:8px;align-items:center;justify-content:center;padding:8px;width:100%;max-width:900px}
+    .note{font-size:13px;color:#333}
+    @media (max-width:520px){h1{font-size:16px}.controls{flex-wrap:wrap}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>동물 얼굴 피하기 게임</h1>
+      <div class="controls">
+        <label for="difficulty">난이도</label>
+        <select id="difficulty">
+          <option value="0">쉬움</option>
+          <option value="1" selected>보통</option>
+          <option value="2">어려움</option>
+        </select>
+        <button id="startBtn">시작</button>
+        <button id="pauseBtn">일시정지</button>
+        <button id="restartBtn">재시작</button>
+      </div>
+    </header>
+
+    <div id="gameArea">
+      <canvas id="gameCanvas" width="1280" height="720"></canvas>
+      <div class="hud" id="hud">
+        <div class="score">점수: <span id="score">0</span></div>
+        <div class="lives">목숨: <span id="lives">3</span></div>
+      </div>
+    </div>
+
+    <div class="bottomBar">
+      <div class="note">← → 또는 화면 터치로 이동 | 동물 얼굴 장애물을 피하세요! 배경은 현재 시간에 따라 변합니다.</div>
+    </div>
+  </div>
+
+  <script>
+    // --- 설정 및 상태 ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    let W = canvas.width, H = canvas.height;
+
+    // UI
+    const startBtn = document.getElementById('startBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const restartBtn = document.getElementById('restartBtn');
+    const difficultySel = document.getElementById('difficulty');
+    const scoreEl = document.getElementById('score');
+    const livesEl = document.getElementById('lives');
+
+    // Game state
+    let running = false;
+    let paused = false;
+    let lastTime = 0;
+    let spawnTimer = 0;
+    let score = 0;
+    let lives = 3;
+
+    // Player
+    const player = { x: W/2, y: H - 90, w: 70, h: 70, speed: 520, vx: 0 };
+
+    // Obstacles
+    const obstacles = [];
+
+    // Animal face palette (emoji) - 다양한 얼굴
+    const animals = ['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐷','🐸','🐵','🦄','🐮'];
+
+    // Difficulty presets: [spawnInterval(ms), baseSpeed(px/s), spawnCountChance]
+    const DIFF = [
+      {spawn: 900, speed: 120, chance: 0.18}, // 쉬움
+      {spawn: 650, speed: 160, chance: 0.27}, // 보통
+      {spawn: 420, speed: 220, chance: 0.36}, // 어려움
+    ];
+
+    // Time-based background gradients
+    function getTimeBg(hour){
+      if(hour >= 6 && hour < 12) return ['#a8e6cf','#dcedc1']; // morning
+      if(hour >= 12 && hour < 18) return ['#87ceeb','#a2d6ff']; // day
+      if(hour >= 18 && hour < 20) return ['#ffd194','#f6abb6']; // sunset
+      return ['#0f172a','#0b3b5c']; // night
+    }
+
+    // Resize handling
+    function resizeCanvas(){
+      // keep internal resolution large for crispness
+      const rect = canvas.getBoundingClientRect();
+      const scale = window.devicePixelRatio || 1;
+      canvas.width = Math.max(640, Math.floor(rect.width * scale));
+      canvas.height = Math.max(360, Math.floor(rect.height * scale));
+      W = canvas.width; H = canvas.height;
+      player.y = H - Math.round( H * 0.12 );
+      player.w = Math.round(Math.min(120, W*0.06));
+      player.h = player.w;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // Spawn obstacle
+    function spawnObstacle(d){
+      const size = Math.round( clamp(32, 96, d.speed/2 + Math.random()*60) );
+      const x = Math.random() * (W - size - 40) + 20;
+      const face = animals[Math.floor(Math.random()*animals.length)];
+      const rotate = (Math.random()-0.5)*0.6;
+      obstacles.push({x, y: -size-10, size, face, vy: d.speed + Math.random()*80, rotate});
+    }
+
+    // clamp
+    function clamp(a,b,c){ return Math.max(a,Math.min(b,c)); }
+
+    // Main update loop
+    function update(ts){
+      if(!running || paused){ lastTime = ts; requestAnimationFrame(update); return; }
+      const dt = Math.min(40, ts - lastTime) / 1000; // seconds cap
+      lastTime = ts;
+
+      const diff = DIFF[ parseInt(difficultySel.value,10) ];
+
+      // spawn
+      spawnTimer += dt*1000;
+      if(spawnTimer > diff.spawn){
+        spawnTimer = 0;
+        // possibly spawn a few depending on chance
+        const count = Math.random() < diff.chance ? 2 : 1;
+        for(let i=0;i<count;i++) spawnObstacle(diff);
+      }
+
+      // update player
+      player.x += player.vx * dt;
+      // friction
+      player.vx *= 0.92;
+      player.x = clamp(10, W - player.w - 10, player.x);
+
+      // update obstacles
+      for(let i = obstacles.length-1; i>=0; i--){
+        const ob = obstacles[i];
+        ob.y += ob.vy * dt;
+        ob.rotate += (dt*0.8);
+        // offscreen
+        if(ob.y > H + 200){
+          obstacles.splice(i,1);
+          // increase score for avoided
+          score += 5;
+          continue;
+        }
+        // collision
+        if(rectCircleCollide(player.x, player.y, player.w, player.h, ob.x+ob.size/2, ob.y+ob.size/2, ob.size*0.45)){
+          // hit
+          obstacles.splice(i,1);
+          lives -= 1;
+          if(lives <= 0){
+            endGame();
+            return requestAnimationFrame(update);
+          }
+        }
+      }
+
+      // small passive score increase
+      score += Math.floor(dt*12);
+
+      // update UI
+      scoreEl.textContent = score;
+      livesEl.textContent = lives;
+
+      draw();
+      requestAnimationFrame(update);
+    }
+
+    // Draw everything
+    function draw(){
+      // background gradient based on current system hour
+      const h = new Date().getHours();
+      const bg = getTimeBg(h);
+      const g = ctx.createLinearGradient(0,0,0,H);
+      g.addColorStop(0, bg[0]);
+      g.addColorStop(1, bg[1]);
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,W,H);
+
+      // subtle stars at night
+      if(h < 6 || h >= 20){
+        ctx.save();
+        for(let i=0;i<30;i++){
+          ctx.globalAlpha = Math.random()*0.6;
+          const sx = (i*47 + 71) % W;
+          const sy = (i*29 + 41) % H * Math.random()*0.7;
+          ctx.fillStyle = 'white';
+          ctx.fillRect(sx, sy, Math.random()*2+0.5, Math.random()*2+0.5);
+        }
+        ctx.restore();
+      }
+
+      // draw player (simple rounded rect with eyes)
+      ctx.save();
+      ctx.translate(player.x + player.w/2, player.y + player.h/2);
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      roundRect(ctx, -player.w/2, -player.h/2, player.w, player.h, 14);
+      ctx.fill();
+      // eyes
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(-player.w*0.18, -player.h*0.08, player.w*0.06,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(player.w*0.18, -player.h*0.08, player.w*0.06,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+
+      // draw obstacles (emoji)
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      for(const ob of obstacles){
+        ctx.save();
+        ctx.translate(ob.x + ob.size/2, ob.y + ob.size/2);
+        ctx.rotate(ob.rotate);
+        // draw circle behind to make emoji pop
+        ctx.beginPath(); ctx.arc(0,0,ob.size/2+6,0,Math.PI*2); ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fill();
+        ctx.font = `${Math.round(ob.size*0.8)}px serif`;
+        ctx.fillText(ob.face, 0, 0 + Math.round(ob.size*0.04));
+        ctx.restore();
+      }
+    }
+
+    // helper: rounded rect
+    function roundRect(ctx,x,y,w,h,r){ if(r===undefined) r=6; ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+    // simple AABB <-> circle-ish collision between player's box and obstacle center
+    function rectCircleCollide(rx,ry,rw,rh,cx,cy,cr){
+      // find closest point
+      const closestX = clamp(rx, rx+rw, cx);
+      const closestY = clamp(ry, ry+rh, cy);
+      const dx = cx - closestX; const dy = cy - closestY;
+      return (dx*dx + dy*dy) <= (cr*cr);
+    }
+
+    // input
+    window.addEventListener('keydown', e => {
+      if(e.key === 'ArrowLeft') player.vx = -player.speed;
+      if(e.key === 'ArrowRight') player.vx = player.speed;
+      if(e.key === ' '){ if(!running) startGame(); else paused = !paused; }
+    });
+    window.addEventListener('keyup', e => { if(e.key === 'ArrowLeft' || e.key === 'ArrowRight') player.vx = 0; });
+
+    // touch controls for mobile
+    let touchX = null;
+    canvas.addEventListener('touchstart', e => { e.preventDefault(); const t = e.touches[0]; touchX = t.clientX; handleTouchMove(t.clientX); });
+    canvas.addEventListener('touchmove', e => { e.preventDefault(); const t = e.touches[0]; handleTouchMove(t.clientX); });
+    canvas.addEventListener('touchend', e => { touchX = null; player.vx = 0; });
+    function handleTouchMove(clientX){
+      const rect = canvas.getBoundingClientRect();
+      const x = (clientX - rect.left) * (canvas.width/rect.width);
+      // set player center to touch x
+      const target = x - player.w/2;
+      player.vx = (target - player.x) * 8; // spring
+    }
+
+    // Buttons
+    startBtn.addEventListener('click', ()=>{ startGame(); });
+    pauseBtn.addEventListener('click', ()=>{ paused = !paused; pauseBtn.textContent = paused ? '재개' : '일시정지'; });
+    restartBtn.addEventListener('click', ()=>{ resetGame(); startGame(); });
+
+    // start/reset/end
+    function startGame(){
+      if(running && !paused) return;
+      if(!running) resetGame();
+      running = true; paused = false; lastTime = performance.now(); requestAnimationFrame(update);
+    }
+    function resetGame(){
+      obstacles.length = 0; score = 0; lives = 3; scoreEl.textContent = score; livesEl.textContent = lives; spawnTimer = 0;
+      player.x = W/2 - player.w/2; player.vx = 0;
+      pauseBtn.textContent = '일시정지';
+    }
+    function endGame(){
+      running = false; paused = false;
+      // show final
+      setTimeout(()=>{
+        const again = confirm(`게임오버\n점수: ${score}\n다시 하시겠습니까?`);
+        if(again){ resetGame(); startGame(); }
+      }, 100);
+    }
+
+    // init
+    resetGame(); draw();
+
+    // utility: clamp for rectCircle
+    function clamp(a,b,c){ if(c < a) return a; if(c > b) return b; return c; }
+
+    // ensure crisp on init
+    requestAnimationFrame(() => { resizeCanvas(); draw(); });
+  </script>
+</body>
+</html>
